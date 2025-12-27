@@ -26,3 +26,8 @@ socket on top and a PLCC plug on the bottom.
 <img src="images/GALpowerup_bottom.png" width="256">
 </a>
 
+## JEDi
+
+JED interpreter for converting non-standard JED files to standard JEDEC format.
+See [JEDi/README.md](JEDi/README.md).
+
