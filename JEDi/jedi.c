@@ -327,7 +327,8 @@ int main(int argc, char *argv[])
 		*out_ptr++ = fuses[i] ? '1' : '0';
 	}
 
-	out_ptr += sprintf(out_ptr, "\r\n*C%04X\r\n%c", fuse_checksum, ETX);
+	/* Terminate the final C field before ETX; strict parsers reject it otherwise. */
+	out_ptr += sprintf(out_ptr, "\r\n*C%04X\r\n*%c", fuse_checksum, ETX);
 
 	for (p = out_buffer; p < out_ptr; p++)
 		file_checksum += (uint8_t)*p;

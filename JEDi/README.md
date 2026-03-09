@@ -84,7 +84,8 @@ Wrote: U212_fixed.jed
 2. **Fixes token format** - Converts `QF2194*` to `*QF2194`
 3. **Corrects QF value** - Determines actual fuse count from L token data
 4. **Calculates checksums** - Proper fuse checksum (C) and file checksum
-5. **Extracts metadata** - Device name from TYPE:/TITL: headers, pin count from QP
+5. **Terminates the final record** - Emits the trailing `*` before ETX for strict JEDEC parsers
+6. **Extracts metadata** - Device name from TYPE:/TITL: headers, pin count from QP
 
 ## Output Format
 
@@ -105,7 +106,7 @@ NOTE: Converted from Wellon format by JEDi
 *L00032 11111111111111111111011011111111
 ...
 *C7741
-<ETX>2B81
+*<ETX>2BAB
 ```
 
 ## Adding Support for New Formats
