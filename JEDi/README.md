@@ -1,6 +1,8 @@
 # JEDi - JED Interpreter
 
-Convert non-standard JED files to standard JEDEC format for use with minipro.
+Convert non-standard JED files to JEDEC variants that strict programmers can
+load, including minipro-style output for Wellon/G540 inputs and GALEP-compatible
+output for "universal programmer" dumps.
 
 ## Problem
 
@@ -31,6 +33,21 @@ Identified by `TITL:` header.
 | STX/ETX markers | Required | **Missing** |
 | Token format | `*QF2194` | `QF2194*` |
 | Fuse data | `*L00000 1111...` per row | `L0000` then data on separate lines |
+
+### Universal Programmer
+
+Identified by an `STX` byte plus a `Fuse map produced by universal...` header.
+
+| Issue | GALEP-Compatible | Universal Programmer |
+|-------|------------------|----------------------|
+| `QF` token | Required by GALEP import | **Missing** |
+| `L` row widths | Device-specific | Present but must be preserved |
+| Fuse checksum | Must match inserted `QF` span | Often triggers `Fuse CRC!` |
+
+### GALEP Export
+
+Identified by `GALEP Jedec-File` header. These files are treated as already
+valid and are left untouched.
 
 ## Building
 
@@ -86,10 +103,15 @@ Wrote: U212_fixed.jed
 4. **Calculates checksums** - Proper fuse checksum (C) and file checksum
 5. **Terminates the final record** - Emits the trailing `*` before ETX for strict JEDEC parsers
 6. **Extracts metadata** - Device name from TYPE:/TITL: headers, pin count from QP
+7. **Preserves original row layout** - Universal programmer rows keep their original addresses and widths
+
+For universal programmer inputs, JEDi emits a GALEP-compatible suffix-`*`
+layout with inserted `QF/F0/G0` records instead of converting to the minipro
+prefix-`*` dialect.
 
 ## Output Format
 
-JEDi produces standard JEDEC files:
+For Wellon and G540 inputs, JEDi produces standard JEDEC files:
 
 ```
 <STX>

@@ -34,8 +34,15 @@ typedef enum {
 	FORMAT_UNKNOWN,
 	FORMAT_WELLON,
 	FORMAT_G540,
+	FORMAT_UNIVERSAL,
+	FORMAT_GALEP,
 	FORMAT_STANDARD
 } jed_format_t;
+
+typedef struct {
+	uint32_t addr;
+	uint16_t len;
+} fuse_row_t;
 
 static const char *format_name(jed_format_t fmt)
 {
@@ -44,11 +51,22 @@ static const char *format_name(jed_format_t fmt)
 		return "Wellon";
 	case FORMAT_G540:
 		return "G540";
+	case FORMAT_UNIVERSAL:
+		return "Universal Programmer";
+	case FORMAT_GALEP:
+		return "GALEP";
 	case FORMAT_STANDARD:
 		return "Standard JEDEC";
 	default:
 		return "Unknown";
 	}
+}
+
+static int has_stx_prefix(const char *buffer, size_t size)
+{
+	size_t limit = size < 8 ? size : 8;
+
+	return memchr(buffer, STX, limit) != NULL;
 }
 
 static jed_format_t detect_format(const char *buffer, size_t size)
@@ -57,6 +75,12 @@ static jed_format_t detect_format(const char *buffer, size_t size)
 		return FORMAT_WELLON;
 	if (strstr(buffer, "TITL:"))
 		return FORMAT_G540;
+	if (strstr(buffer, "GALEP Jedec-File"))
+		return FORMAT_GALEP;
+	if (has_stx_prefix(buffer, size) &&
+	    (strstr(buffer, "Fuse map produced by universal programmer") ||
+	     strstr(buffer, "Fuse map produced by universal device programmer")))
+		return FORMAT_UNIVERSAL;
 	/* Check for standard format: STX present and *QF token */
 	if (memchr(buffer, STX, size < 100 ? size : 100) && strstr(buffer, "*QF"))
 		return FORMAT_STANDARD;
@@ -67,7 +91,7 @@ static void usage(const char *prog)
 {
 	fprintf(stderr, "Usage: %s <input.jed> [output.jed]\n", prog);
 	fprintf(stderr, "\nJED Interpreter - Convert non-standard JED to JEDEC format\n");
-	fprintf(stderr, "\nSupported formats: Wellon, G540\n");
+	fprintf(stderr, "\nSupported formats: Wellon, G540, Universal Programmer\n");
 	fprintf(stderr, "\nIf output is omitted, writes to <input>_fixed.jed\n");
 }
 
@@ -163,6 +187,128 @@ static uint32_t parse_g540_fuses(const char *buffer, uint8_t *fuses,
 	return addr;
 }
 
+static int append_fuse_row(fuse_row_t **rows, size_t *count, size_t *capacity,
+			   uint32_t addr, uint16_t len)
+{
+	fuse_row_t *grown;
+	size_t new_capacity;
+
+	if (*count == *capacity) {
+		new_capacity = *capacity ? (*capacity * 2) : 128;
+		grown = realloc(*rows, new_capacity * sizeof(**rows));
+		if (!grown)
+			return -1;
+		*rows = grown;
+		*capacity = new_capacity;
+	}
+
+	(*rows)[*count].addr = addr;
+	(*rows)[*count].len = len;
+	(*count)++;
+	return 0;
+}
+
+static int parse_line_records(const char *buffer, uint8_t *fuses,
+			      uint32_t max_fuses, fuse_row_t **rows_out,
+			      size_t *row_count_out, uint32_t *qf_out)
+{
+	const char *line = buffer;
+	fuse_row_t *rows = NULL;
+	size_t count = 0, capacity = 0;
+	uint32_t max_addr = 0;
+
+	while (*line) {
+		const char *cursor = line;
+		const char *line_end;
+		char *addr_end;
+		uint32_t addr, row_addr;
+		uint16_t bits = 0;
+
+		while (*cursor == STX || *cursor == '\r' || *cursor == '\n')
+			cursor++;
+		if (!*cursor || *cursor == ETX)
+			break;
+
+		line_end = cursor;
+		while (*line_end && *line_end != '\r' && *line_end != '\n' &&
+		       *line_end != ETX)
+			line_end++;
+
+		if (*cursor == '*')
+			cursor++;
+		if (*cursor == 'L') {
+			addr = strtoul(cursor + 1, &addr_end, 10);
+			if (addr_end != cursor + 1) {
+				while (addr_end < line_end &&
+				       isspace((unsigned char)*addr_end))
+					addr_end++;
+
+				row_addr = addr;
+				while (addr_end < line_end && *addr_end != '*') {
+					if (*addr_end == '0' || *addr_end == '1') {
+						if (addr >= max_fuses)
+							break;
+						fuses[addr++] = (*addr_end == '1') ? 1 : 0;
+						bits++;
+					}
+					addr_end++;
+				}
+
+				if (bits > 0) {
+					if (append_fuse_row(&rows, &count, &capacity,
+							    row_addr, bits) < 0) {
+						free(rows);
+						return -1;
+					}
+					if (addr > max_addr)
+						max_addr = addr;
+				}
+			}
+		}
+
+		line = line_end;
+		while (*line == '\r' || *line == '\n')
+			line++;
+	}
+
+	*rows_out = rows;
+	*row_count_out = count;
+	*qf_out = max_addr;
+	return 0;
+}
+
+static int extract_stx_header_line(const char *buffer, char *name, size_t size)
+{
+	const char *p = strchr(buffer, STX);
+	const char *end;
+	size_t len;
+
+	if (!p)
+		return -1;
+
+	p++;
+	while (*p == '\r' || *p == '\n')
+		p++;
+	if (!*p)
+		return -1;
+
+	end = p;
+	while (*end && *end != '\r' && *end != '\n' && *end != ETX)
+		end++;
+
+	len = end - p;
+	if (len >= size)
+		len = size - 1;
+	if (len > 0)
+		memcpy(name, p, len);
+	name[len] = '\0';
+
+	while (len > 0 && isspace((unsigned char)name[len - 1]))
+		name[--len] = '\0';
+
+	return 0;
+}
+
 static int extract_device_name(const char *buffer, char *name, size_t size,
 			       jed_format_t format)
 {
@@ -177,6 +323,8 @@ static int extract_device_name(const char *buffer, char *name, size_t size,
 		p = strstr(buffer, "TITL:");
 		if (p)
 			p += 5;
+	} else if (format == FORMAT_UNIVERSAL || format == FORMAT_GALEP) {
+		return extract_stx_header_line(buffer, name, size);
 	}
 
 	if (!p)
@@ -209,6 +357,17 @@ static uint32_t extract_qp(const char *buffer)
 	return 0;
 }
 
+static uint32_t infer_qp(const char *device_name)
+{
+	if (strstr(device_name, "22V10"))
+		return 24;
+	if (strstr(device_name, "20V8"))
+		return 24;
+	if (strstr(device_name, "16V8"))
+		return 20;
+	return 20;
+}
+
 int main(int argc, char *argv[])
 {
 	FILE *fin, *fout;
@@ -223,6 +382,8 @@ int main(int argc, char *argv[])
 	char *out_ptr;
 	char out_filename[256];
 	jed_format_t format;
+	fuse_row_t *rows = NULL;
+	size_t row_count = 0;
 
 	if (argc < 2 || argc > 3) {
 		usage(argv[0]);
@@ -267,8 +428,10 @@ int main(int argc, char *argv[])
 	format = detect_format(buffer, file_size);
 	printf("Format: %s\n", format_name(format));
 
-	if (format == FORMAT_STANDARD) {
-		printf("File is already standard JEDEC format\n");
+	if (format == FORMAT_STANDARD || format == FORMAT_GALEP) {
+		printf("File is already %s format\n",
+		       format == FORMAT_GALEP ? "GALEP-compatible JEDEC" :
+						"standard JEDEC");
 		free(buffer);
 		return 0;
 	}
@@ -285,10 +448,19 @@ int main(int argc, char *argv[])
 
 	qp = extract_qp(buffer);
 	if (!qp)
-		qp = 20; /* Default for GAL16V8 */
+		qp = infer_qp(device_name);
 	printf("Pins: %u\n", qp);
 
 	switch (format) {
+	case FORMAT_UNIVERSAL:
+		if (parse_line_records(buffer, fuses, MAX_FUSES, &rows, &row_count,
+				       &qf) < 0) {
+			fprintf(stderr, "Out of memory\n");
+			free(fuses);
+			free(buffer);
+			return 1;
+		}
+		break;
 	case FORMAT_G540:
 		qf = parse_g540_fuses(buffer, fuses, MAX_FUSES);
 		break;
@@ -301,6 +473,7 @@ int main(int argc, char *argv[])
 
 	if (qf == 0) {
 		fprintf(stderr, "No fuse data found\n");
+		free(rows);
 		free(fuses);
 		free(buffer);
 		return 1;
@@ -314,21 +487,40 @@ int main(int argc, char *argv[])
 	printf("Checksum: %04X\n", fuse_checksum);
 
 	out_ptr = out_buffer;
-	out_ptr += sprintf(out_ptr,
-		"%c\r\nDevice: %s\r\n\r\n"
-		"NOTE: Converted from %s format by JEDi\r\n\r\n"
-		"*QP%u\r\n*QF%u\r\n*F0\r\n*G0\r\n\r\n",
-		STX, device_name, format_name(format), qp, qf);
+	if (format == FORMAT_UNIVERSAL) {
+		out_ptr += sprintf(out_ptr, "%c\r\n%s\r\n\r\nQF%u*\r\nF0*\r\nG0*\r\n\r\n",
+				   STX, device_name, qf);
+		for (i = 0; i < row_count; i++) {
+			uint32_t addr = rows[i].addr;
+			uint16_t len = rows[i].len;
+			uint16_t j;
 
-	for (i = 0; i < qf; i++) {
-		if ((i % ROW_SIZE) == 0)
-			out_ptr += sprintf(out_ptr, "%s*L%05u ",
-					  i ? "\r\n" : "", (uint32_t)i);
-		*out_ptr++ = fuses[i] ? '1' : '0';
+			out_ptr += sprintf(out_ptr, "L%05u ", addr);
+			for (j = 0; j < len; j++)
+				*out_ptr++ = fuses[addr + j] ? '1' : '0';
+			out_ptr += sprintf(out_ptr, "*\r\n");
+		}
+		out_ptr += sprintf(out_ptr, "C%04X*\r\n%c", fuse_checksum, ETX);
+	} else {
+		out_ptr += sprintf(out_ptr,
+			"%c\r\nDevice: %s\r\n\r\n"
+			"NOTE: Converted from %s format by JEDi\r\n\r\n"
+			"*QP%u\r\n*QF%u\r\n*F0\r\n*G0\r\n\r\n",
+			STX, device_name, format_name(format), qp, qf);
+
+		for (i = 0; i < qf; i++) {
+			if ((i % ROW_SIZE) == 0)
+				out_ptr += sprintf(out_ptr, "%s*L%05u ",
+						  i ? "\r\n" : "", (uint32_t)i);
+			*out_ptr++ = fuses[i] ? '1' : '0';
+		}
+
+		/*
+		 * Terminate the final C field before ETX; strict parsers reject
+		 * it otherwise.
+		 */
+		out_ptr += sprintf(out_ptr, "\r\n*C%04X\r\n*%c", fuse_checksum, ETX);
 	}
-
-	/* Terminate the final C field before ETX; strict parsers reject it otherwise. */
-	out_ptr += sprintf(out_ptr, "\r\n*C%04X\r\n*%c", fuse_checksum, ETX);
 
 	for (p = out_buffer; p < out_ptr; p++)
 		file_checksum += (uint8_t)*p;
@@ -338,6 +530,7 @@ int main(int argc, char *argv[])
 	fout = fopen(out_filename, "wb");
 	if (!fout) {
 		fprintf(stderr, "Cannot create: %s\n", out_filename);
+		free(rows);
 		free(fuses);
 		free(buffer);
 		return 1;
@@ -347,6 +540,7 @@ int main(int argc, char *argv[])
 
 	printf("Wrote: %s\n", out_filename);
 
+	free(rows);
 	free(fuses);
 	free(buffer);
 	return 0;
